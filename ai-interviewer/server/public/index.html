@@ -1,0 +1,158 @@
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>AI Technical Interviewer</title>
+	<style>
+		body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0b1020; color: #eef2ff; }
+		button { padding: 10px 14px; background: #4f46e5; border: none; color: white; border-radius: 8px; cursor: pointer; }
+		button:disabled { opacity: 0.6; cursor: not-allowed; }
+		.controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+		.row { display: flex; gap: 16px; }
+		.col { flex: 1; min-width: 320px; }
+		.panel { background: #11182f; border: 1px solid #223052; border-radius: 12px; padding: 12px; }
+		ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+		li { background: #0f172a; border: 1px solid #1e293b; padding: 10px; border-radius: 8px; }
+		.small { color: #93c5fd; font-size: 12px; }
+		label { color: #c7d2fe; font-size: 12px; }
+		textarea { width: 100%; min-height: 120px; background: #0f172a; color: #e2e8f0; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; }
+		video { max-width: 100%; border-radius: 8px; border: 1px solid #223052; }
+	</style>
+</head>
+<body>
+	<h2>AI Technical Interviewer</h2>
+	<div class="controls">
+		<button id="btnStart">Start Screen Share</button>
+		<button id="btnStop" disabled>Stop</button>
+		<button id="btnSummary" disabled>Get Final Summary</button>
+		<span class="small" id="status">Idle</span>
+	</div>
+	<div class="row">
+		<div class="col">
+			<div class="panel">
+				<label>Live Preview</label>
+				<video id="video" autoplay muted playsinline></video>
+			</div>
+		</div>
+		<div class="col">
+			<div class="panel">
+				<label>Live Observations</label>
+				<ul id="observations"></ul>
+			</div>
+			<div class="panel" style="margin-top: 12px;">
+				<label>Final Summary</label>
+				<div id="summary"></div>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		const video = document.getElementById('video');
+		const btnStart = document.getElementById('btnStart');
+		const btnStop = document.getElementById('btnStop');
+		const btnSummary = document.getElementById('btnSummary');
+		const statusEl = document.getElementById('status');
+		const observationsEl = document.getElementById('observations');
+		const summaryEl = document.getElementById('summary');
+
+		let mediaStream = null;
+		let ws = null;
+		let sessionId = 'sess_' + Math.random().toString(36).slice(2);
+		let captureInterval = null;
+
+		function logObservation(text) {
+			const li = document.createElement('li');
+			li.textContent = text;
+			observationsEl.prepend(li);
+		}
+
+		function setStatus(text) { statusEl.textContent = text; }
+
+		async function start() {
+			btnStart.disabled = true;
+			setStatus('Requesting screen...');
+			try {
+				mediaStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 10 } });
+				video.srcObject = mediaStream;
+				btnStop.disabled = false;
+				btnSummary.disabled = false;
+				connectWS();
+				startCaptureLoop();
+				setStatus('Live');
+			} catch (e) {
+				console.error(e);
+				setStatus('Permission denied or unavailable');
+				btnStart.disabled = false;
+			}
+		}
+
+		function stop() {
+			if (captureInterval) clearInterval(captureInterval);
+			if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+			if (ws) ws.close();
+			btnStart.disabled = false;
+			btnStop.disabled = true;
+			setStatus('Stopped');
+		}
+
+		function connectWS() {
+			const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+			ws = new WebSocket(`${proto}://${location.host}/ws`);
+			ws.onopen = () => setStatus('Live (connected)');
+			ws.onmessage = (ev) => {
+				const msg = JSON.parse(ev.data);
+				if (msg.type === 'observation') {
+					logObservation(msg.text);
+				} else if (msg.type === 'summary') {
+					summaryEl.textContent = msg.text;
+				}
+			};
+			ws.onclose = () => setStatus('Disconnected');
+		}
+
+		function startCaptureLoop() {
+			const canvas = document.createElement('canvas');
+			const ctx = canvas.getContext('2d');
+			const track = mediaStream.getVideoTracks()[0];
+			const settings = track.getSettings();
+			canvas.width = Math.min(1280, settings.width || 1280);
+			canvas.height = Math.min(720, settings.height || 720);
+
+			captureInterval = setInterval(async () => {
+				try {
+					ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+					const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.8));
+					const arrayBuffer = await blob.arrayBuffer();
+					const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+					if (ws && ws.readyState === WebSocket.OPEN) {
+						ws.send(JSON.stringify({
+							type: 'observe',
+							sessionId,
+							imageBase64: base64,
+							cursorText: ''
+						}));
+					}
+				} catch (e) {
+					console.error(e);
+				}
+			}, 1500);
+		}
+
+		btnStart.addEventListener('click', start);
+		btnStop.addEventListener('click', stop);
+		btnSummary.addEventListener('click', () => {
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: 'summary', sessionId }));
+			} else {
+				fetch('/api/summary', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ sessionId })
+				}).then(r => r.json()).then(data => {
+					if (data.ok) summaryEl.textContent = data.text;
+				});
+			}
+		});
+	</script>
+</body>
+</html>
